@@ -1,0 +1,151 @@
+from machine import ADC, Pin
+import time
+import dht
+import network
+import urequests
+
+SSID = "BRSK-7274A7"
+PASSWORD = "ymwrj3fkxg"
+
+MOISTURE_API_KEY = "KPY9Y27J2Q9O3CCK"
+TURBIDITY_API_KEY = "7ZE9CBK4GJC7ANTQ"
+TEMP_API_KEY = "GXY7HKM8Z9NVQMNR"
+HUMIDITY_API_KEY = "4ELRIDMF0K7W4XCQ"
+
+soil = ADC(Pin(26))
+turbidity = ADC(Pin(27))
+dht_sensor = dht.DHT11(Pin(15))
+
+DRY_VALUE = 60000
+WET_VALUE = 25000
+
+PREDICTION_STEPS = [100, 200, 300, 400, 500, 600, 700, 800]
+
+data_count = 0
+temp = 0
+humidity = 0
+
+moisture_history = []
+turbidity_history = []
+temp_history = []
+humidity_history = []
+
+def predict_from_average(latest, history, steps):
+    average_value = sum(history) / len(history)
+    rate = (latest - average_value) / steps
+    predicted = latest + (rate * steps)
+    return predicted
+
+def send_to_thingspeak(api_key, field_number, value):
+    url = (
+        "https://api.thingspeak.com/update?"
+        "api_key=" + api_key +
+        "&field" + str(field_number) + "=" + str(round(value, 2))
+    )
+
+    try:
+        response = urequests.get(url)
+        print("Sent to ThingSpeak:", response.text)
+        response.close()
+    except Exception as e:
+        print("ThingSpeak error:", e)
+
+# Connect to Wi-Fi
+wlan = network.WLAN(network.STA_IF)
+wlan.active(True)
+wlan.connect(SSID, PASSWORD)
+
+print("Connecting to Wi-Fi...")
+while not wlan.isconnected():
+    time.sleep(1)
+
+print("Connected to Wi-Fi")
+
+while True:
+    data_count += 1
+
+    # Read soil moisture
+    soil_raw = soil.read_u16()
+    moisture = (DRY_VALUE - soil_raw) * 100 / (DRY_VALUE - WET_VALUE)
+    moisture = max(0, min(100, moisture))
+
+    # Read turbidity
+    turbidity_raw = turbidity.read_u16()
+    turbidity_percent = turbidity_raw * 100 / 65535
+
+    # Read DHT11
+    try:
+        dht_sensor.measure()
+        temp = dht_sensor.temperature()
+        humidity = dht_sensor.humidity()
+    except:
+        pass
+
+    # Store readings
+    moisture_history.append(moisture)
+    turbidity_history.append(turbidity_percent)
+    temp_history.append(temp)
+    humidity_history.append(humidity)
+
+    # Keep only latest 800 readings for current cycle
+    if len(moisture_history) > 800:
+        moisture_history.pop(0)
+        turbidity_history.pop(0)
+        temp_history.pop(0)
+        humidity_history.pop(0)
+
+    # Show live results in Thonny
+    print("Set:", data_count)
+    print("Moisture:", round(moisture, 2), "%")
+    print("Turbidity:", round(turbidity_percent, 2), "%")
+    print("Temperature:", temp, "°C")
+    print("Humidity:", humidity, "%")
+
+    # Show 10-reading prediction in Thonny only
+    if len(moisture_history) >= 10 and data_count % 10 == 0:
+        moisture_10 = predict_from_average(moisture, moisture_history[-10:], 10)
+        turbidity_10 = predict_from_average(turbidity_percent, turbidity_history[-10:], 10)
+        temp_10 = predict_from_average(temp, temp_history[-10:], 10)
+        humidity_10 = predict_from_average(humidity, humidity_history[-10:], 10)
+
+        print("----- 10 READING PREDICTION -----")
+        print("Moisture 10 Prediction:", round(moisture_10, 2), "%")
+        print("Turbidity 10 Prediction:", round(turbidity_10, 2), "%")
+        print("Temperature 10 Prediction:", round(temp_10, 2), "°C")
+        print("Humidity 10 Prediction:", round(humidity_10, 2), "%")
+        print("---------------------------------")
+
+    # Repeated 100–800 cycle predictions for ThingSpeak
+    cycle_position = data_count % 800
+    if cycle_position == 0:
+        cycle_position = 800
+
+    if cycle_position in PREDICTION_STEPS and len(moisture_history) >= cycle_position:
+        field_number = cycle_position // 100
+
+        moisture_cycle = moisture_history[-cycle_position:]
+        turbidity_cycle = turbidity_history[-cycle_position:]
+        temp_cycle = temp_history[-cycle_position:]
+        humidity_cycle = humidity_history[-cycle_position:]
+
+        moisture_pred = predict_from_average(moisture, moisture_cycle, cycle_position)
+        turbidity_pred = predict_from_average(turbidity_percent, turbidity_cycle, cycle_position)
+        temp_pred = predict_from_average(temp, temp_cycle, cycle_position)
+        humidity_pred = predict_from_average(humidity, humidity_cycle, cycle_position)
+
+        print("Sending", cycle_position, "prediction to field", field_number)
+
+        send_to_thingspeak(MOISTURE_API_KEY, field_number, moisture_pred)
+        time.sleep(16)
+
+        send_to_thingspeak(TURBIDITY_API_KEY, field_number, turbidity_pred)
+        time.sleep(16)
+
+        send_to_thingspeak(TEMP_API_KEY, field_number, temp_pred)
+        time.sleep(16)
+
+        send_to_thingspeak(HUMIDITY_API_KEY, field_number, humidity_pred)
+        time.sleep(16)
+
+    print("----------------")
+    time.sleep(15)
